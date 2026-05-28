@@ -57,7 +57,7 @@ npm install
 ```
 
 ### 2. Configure Environment Variables
-Create a file named `.env` in the root directory (based on `.env.example`):
+Create a file named `.env` in the root directory of the project and populate it with the following configuration:
 ```env
 # GEMINI_API_KEY: Obtain from Google AI Studio (https://aistudio.google.com/)
 GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
