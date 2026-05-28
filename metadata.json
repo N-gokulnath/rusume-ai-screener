@@ -1,0 +1,6 @@
+{
+  "name": "Resume Ranker",
+  "description": "An AI-powered resume screening and candidate ranking application that parses resumes against job descriptions to score, evaluate, and rank applicants.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
