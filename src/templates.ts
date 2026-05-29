@@ -6,7 +6,7 @@ export interface JDTemplate {
 
 export const JD_TEMPLATES: JDTemplate[] = [
   {
-    title: "Senior Full-Stack Engineer (React & Nord.js)",
+    title: "Senior Full-Stack Engineer (React & Node.js)",
     category: "Engineering",
     text: `Position: Senior Full-Stack Developer
 Location: Remote / Full-time

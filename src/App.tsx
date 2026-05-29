@@ -515,9 +515,7 @@ export default function App() {
       {/* Clean Minimalism Navbar */}
       <nav className="h-16 border-b border-[#E9ECEF] bg-white flex items-center justify-between px-8 flex-shrink-0 sticky top-0 z-40" id="app_main_header">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center">
-            <div className="w-4 h-4 border-2 border-white rounded-xs"></div>
-          </div>
+          <img src="/assets/favicon_logo.png" alt="RankFlow Logo" className="w-8 h-8 object-contain rounded-md" />
           <div className="flex flex-col">
             <span className="font-bold text-sm tracking-widest text-[#1E3A8A] uppercase">RankFlow</span>
             <span className="text-[9px] text-slate-400 font-medium font-mono leading-none tracking-tight">AI SCREENING ENGINE</span>
@@ -587,9 +585,7 @@ export default function App() {
         ) : !isAuthenticated ? (
           <div className="w-full max-w-md bg-white border border-[#E9ECEF] rounded-2xl shadow-3xs overflow-hidden p-8 flex flex-col gap-6" id="auth_form_card">
             <div className="text-center">
-              <div className="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center mx-auto mb-3">
-                <div className="w-6 h-6 border-2 border-white rounded-xs"></div>
-              </div>
+              <img src="/assets/favicon_logo.png" alt="RankFlow Logo" className="w-12 h-12 object-contain rounded-xl mx-auto mb-3" />
               <h2 className="text-xl font-bold text-gray-900 font-sans tracking-tight">
                 {authTab === "login" ? "Welcome back" : "Create developer profile"}
               </h2>

@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -5,7 +8,11 @@ import multer from "multer";
 import mammoth from "mammoth";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import { PrismaClient } from "@prisma/client";
 import { ScreenedCandidate, JobDescriptionData } from "./src/types.js";
+
+// Initialize Prisma Client
+const prisma = new PrismaClient();
 
 // Lazy-initialized Gemini Client
 let aiClient: GoogleGenAI | null = null;
@@ -13,7 +20,7 @@ function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
     const key = process.env.GEMINI_API_KEY;
     if (!key) {
-      throw new Error("GEMINI_API_KEY environment variable is missing. Configure it in Settings > Secrets.");
+      throw new Error("GEMINI_API_KEY environment variable is missing. Configure it in your .env file.");
     }
     aiClient = new GoogleGenAI({
       apiKey: key,
@@ -27,43 +34,7 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
-// In-Memory Database Store for Session & Users
-interface UserProfile {
-  email: string;
-  name?: string;
-  passwordHash: string;
-}
-
-interface UserStore {
-  candidatesDb: ScreenedCandidate[];
-  activeJobDescription: JobDescriptionData;
-}
-
-const usersDb: UserProfile[] = [
-  {
-    email: "demo@rankflow.ai",
-    name: "Demo Recruiter",
-    passwordHash: "demo123"
-  }
-];
-
-const userStores: Record<string, UserStore> = {
-  "demo@rankflow.ai": {
-    candidatesDb: [],
-    activeJobDescription: { text: "", title: "" }
-  }
-};
-
-function getUserStore(email: string): UserStore {
-  if (!userStores[email]) {
-    userStores[email] = {
-      candidatesDb: [],
-      activeJobDescription: { text: "", title: "" }
-    };
-  }
-  return userStores[email];
-}
-
+// Token-based authentication helper (verifies user in the DB)
 function getAuthenticatedUser(req: any): string | null {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -71,11 +42,7 @@ function getAuthenticatedUser(req: any): string | null {
   }
   const token = authHeader.substring(7);
   if (token.startsWith("token_for_")) {
-    const email = token.replace("token_for_", "");
-    const exists = usersDb.some((u) => u.email === email);
-    if (exists) {
-      return email;
-    }
+    return token.replace("token_for_", "");
   }
   return null;
 }
@@ -295,31 +262,52 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Setup Multer
+  // Setup Multer for file uploads
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 12 * 1024 * 1024 }, // 12MB limit
   });
 
-  // API REST endpoints
+  // Seed demo recruiter account if it doesn't already exist
+  try {
+    const demoUser = await prisma.user.findUnique({
+      where: { email: "demo@rankflow.ai" }
+    });
+    if (!demoUser) {
+      await prisma.user.create({
+        data: {
+          email: "demo@rankflow.ai",
+          name: "Demo Recruiter",
+          passwordHash: "demo123"
+        }
+      });
+      console.log("Demo recruiter account seeded successfully in database.");
+    }
+  } catch (err) {
+    console.error("Error seeding database:", err);
+  }
 
   // A. AUTHENTICATION SERVICE ENDPOINTS
-  app.post("/api/auth/signup", (req, res) => {
+  app.post("/api/auth/signup", async (req, res) => {
     try {
       const { email, password, name } = req.body;
       if (!email || !password) {
         return res.status(400).json({ error: "Email and password are required credentials." });
       }
       const trimmedEmail = email.trim().toLowerCase();
-      const exists = usersDb.some((u) => u.email === trimmedEmail);
+      const exists = await prisma.user.findUnique({
+        where: { email: trimmedEmail }
+      });
       if (exists) {
         return res.status(400).json({ error: "An account with this email already exists." });
       }
-      const newUser = { email: trimmedEmail, name: name || trimmedEmail.split("@")[0], passwordHash: password };
-      usersDb.push(newUser);
-      
-      // Initialize an isolated user store
-      getUserStore(trimmedEmail);
+      const newUser = await prisma.user.create({
+        data: {
+          email: trimmedEmail,
+          name: name || trimmedEmail.split("@")[0],
+          passwordHash: password
+        }
+      });
       
       return res.json({
         success: true,
@@ -331,15 +319,17 @@ async function startServer() {
     }
   });
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     try {
       const { email, password } = req.body;
       if (!email || !password) {
         return res.status(400).json({ error: "Email and password are required credentials." });
       }
       const trimmedEmail = email.trim().toLowerCase();
-      const user = usersDb.find((u) => u.email === trimmedEmail && u.passwordHash === password);
-      if (!user) {
+      const user = await prisma.user.findUnique({
+        where: { email: trimmedEmail }
+      });
+      if (!user || user.passwordHash !== password) {
         return res.status(401).json({ error: "Invalid email or password combination." });
       }
       return res.json({
@@ -352,31 +342,66 @@ async function startServer() {
     }
   });
 
-  app.get("/api/auth/me", (req, res) => {
+  app.get("/api/auth/me", async (req, res) => {
     const email = getAuthenticatedUser(req);
     if (!email) {
       return res.status(401).json({ error: "Not authenticated" });
     }
-    const user = usersDb.find((u) => u.email === email);
+    const user = await prisma.user.findUnique({
+      where: { email }
+    });
+    if (!user) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
     return res.json({
-      user: { email, name: user?.name || email.split("@")[0] }
+      user: { email, name: user.name }
     });
   });
 
   // B. CANDIDATE & SCREENING ENDPOINTS (SECURED)
 
   // 1. Fetch current screening DB status
-  app.get("/api/candidates", (req, res) => {
+  app.get("/api/candidates", async (req, res) => {
     try {
       const email = getAuthenticatedUser(req);
       if (!email) {
         return res.status(401).json({ error: "Authorization required. Please log in first." });
       }
-      const store = getUserStore(email);
-      const sortedResult = computeRanks(store.candidatesDb);
+      const user = await prisma.user.findUnique({
+        where: { email },
+        include: {
+          candidates: true,
+          activeJd: true
+        }
+      });
+      if (!user) {
+        return res.status(401).json({ error: "Authorization required. Please log in first." });
+      }
+
+      // Parse JSON database fields to real typed objects
+      const candidates: ScreenedCandidate[] = user.candidates.map((c) => ({
+        id: c.id,
+        name: c.name,
+        email: c.email,
+        phone: c.phone,
+        fileName: c.fileName,
+        matchScore: c.matchScore,
+        rank: c.rank || undefined,
+        matchingSkills: JSON.parse(c.matchingSkills),
+        missingSkills: JSON.parse(c.missingSkills),
+        experienceRelevance: JSON.parse(c.experienceRelevance),
+        educationAlignment: JSON.parse(c.educationAlignment),
+        keyStrengths: JSON.parse(c.keyStrengths),
+        overallSummary: c.overallSummary,
+        parsedText: c.parsedText || undefined,
+        error: c.error || undefined
+      }));
+
+      const sortedResult = computeRanks(candidates);
+      
       res.json({
         candidates: sortedResult,
-        jobDescription: store.activeJobDescription,
+        jobDescription: user.activeJd ? { text: user.activeJd.text, title: user.activeJd.title } : { text: "", title: "" },
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -396,9 +421,16 @@ async function startServer() {
         if (!email) {
           return res.status(401).json({ error: "Authentication required to run screening pipeline." });
         }
-        const store = getUserStore(email);
+        const user = await prisma.user.findUnique({
+          where: { email },
+          include: { activeJd: true }
+        });
+        if (!user) {
+          return res.status(401).json({ error: "Authentication required to run screening pipeline." });
+        }
 
         let jobDescriptionText = req.body.jobDescriptionText || "";
+        let activeJdTitle = req.body.jobDescriptionTitle || "";
         let append = req.body.append === "true";
 
         // Try parsing JD file if uploaded
@@ -411,44 +443,61 @@ async function startServer() {
             const extracted = await extractTextFromFile(jdFile);
             jobDescriptionText = extracted.text;
           }
-          store.activeJobDescription.title = jdFile.originalname;
+          activeJdTitle = jdFile.originalname;
         }
 
         if (!jobDescriptionText || jobDescriptionText.trim().length === 0) {
-          if (store.activeJobDescription.text) {
-            jobDescriptionText = store.activeJobDescription.text;
+          if (user.activeJd && user.activeJd.text) {
+            jobDescriptionText = user.activeJd.text;
+            if (!activeJdTitle) {
+              activeJdTitle = user.activeJd.title;
+            }
           } else {
             return res.status(400).json({ error: "Please enter a Job Description or upload a JD document. This is required to screen candidate resumes." });
           }
         }
 
-        // Update active job description
-        store.activeJobDescription.text = jobDescriptionText;
-        if (req.body.jobDescriptionTitle) {
-          store.activeJobDescription.title = req.body.jobDescriptionTitle;
-        } else if (!store.activeJobDescription.title) {
-          store.activeJobDescription.title = jobDescriptionText.substring(0, 35).trim() + "...";
+        // Set default title if not set
+        if (!activeJdTitle) {
+          activeJdTitle = jobDescriptionText.substring(0, 35).trim() + "...";
         }
+
+        // Update active job description in DB
+        await prisma.jobDescription.upsert({
+          where: { userId: user.id },
+          update: {
+            text: jobDescriptionText,
+            title: activeJdTitle
+          },
+          create: {
+            userId: user.id,
+            text: jobDescriptionText,
+            title: activeJdTitle
+          }
+        });
 
         // Get resumes
         const resumeFiles = (req.files && req.files["resumes"]) || [];
         if (resumeFiles.length === 0 && !append) {
-          if (!append) {
-            store.candidatesDb = [];
-          }
+          // If we are not appending and upload is empty, clear old candidate lists
+          await prisma.candidate.deleteMany({
+            where: { userId: user.id }
+          });
           return res.json({
             candidates: [],
-            jobDescription: store.activeJobDescription,
+            jobDescription: { text: jobDescriptionText, title: activeJdTitle },
             message: "Job description updated successfully.",
           });
         }
 
-        // Wipe old DB if not appending
+        // Wipe old candidate entries if not appending
         if (!append) {
-          store.candidatesDb = [];
+          await prisma.candidate.deleteMany({
+            where: { userId: user.id }
+          });
         }
 
-        // Run screening of files in parallel
+        // Screen files in parallel using the Gemini AI API
         const results = await Promise.all(
           resumeFiles.map(async (file: Express.Multer.File) => {
             try {
@@ -474,13 +523,64 @@ async function startServer() {
           })
         );
 
-        // Save to DB
-        store.candidatesDb.push(...results);
+        // Write each candidates outcome to database
+        for (const resItem of results) {
+          await prisma.candidate.create({
+            data: {
+              id: resItem.id.length > 30 ? undefined : resItem.id, // Generate UUID if random string is too long
+              userId: user.id,
+              name: resItem.name,
+              email: resItem.email,
+              phone: resItem.phone,
+              fileName: resItem.fileName,
+              matchScore: resItem.matchScore,
+              matchingSkills: JSON.stringify(resItem.matchingSkills),
+              missingSkills: JSON.stringify(resItem.missingSkills),
+              experienceRelevance: JSON.stringify(resItem.experienceRelevance),
+              educationAlignment: JSON.stringify(resItem.educationAlignment),
+              keyStrengths: JSON.stringify(resItem.keyStrengths),
+              overallSummary: resItem.overallSummary,
+              parsedText: resItem.parsedText || null,
+              error: resItem.error || null
+            }
+          });
+        }
 
-        const currentSortedAndRanked = computeRanks(store.candidatesDb);
+        // Fetch remaining candidates, compute ranks, and sync to DB
+        const remainingDbCandidates = await prisma.candidate.findMany({
+          where: { userId: user.id }
+        });
+
+        const parsedCandidates: ScreenedCandidate[] = remainingDbCandidates.map((c) => ({
+          id: c.id,
+          name: c.name,
+          email: c.email,
+          phone: c.phone,
+          fileName: c.fileName,
+          matchScore: c.matchScore,
+          matchingSkills: JSON.parse(c.matchingSkills),
+          missingSkills: JSON.parse(c.missingSkills),
+          experienceRelevance: JSON.parse(c.experienceRelevance),
+          educationAlignment: JSON.parse(c.educationAlignment),
+          keyStrengths: JSON.parse(c.keyStrengths),
+          overallSummary: c.overallSummary,
+          parsedText: c.parsedText || undefined,
+          error: c.error || undefined
+        }));
+
+        const rankedCandidates = computeRanks(parsedCandidates);
+
+        // Save ranks to DB
+        for (const rc of rankedCandidates) {
+          await prisma.candidate.update({
+            where: { id: rc.id },
+            data: { rank: rc.rank }
+          });
+        }
+
         return res.json({
-          candidates: currentSortedAndRanked,
-          jobDescription: store.activeJobDescription,
+          candidates: rankedCandidates,
+          jobDescription: { text: jobDescriptionText, title: activeJdTitle },
         });
       } catch (err: any) {
         console.error("General screening error:", err);
@@ -490,27 +590,81 @@ async function startServer() {
   );
 
   // 3. Clear all screens
-  app.post("/api/candidates/clear", (req, res) => {
-    const email = getAuthenticatedUser(req);
-    if (!email) {
-      return res.status(401).json({ error: "Authentication required to reset pipeline." });
+  app.post("/api/candidates/clear", async (req, res) => {
+    try {
+      const email = getAuthenticatedUser(req);
+      if (!email) {
+        return res.status(401).json({ error: "Authentication required to reset pipeline." });
+      }
+      const user = await prisma.user.findUnique({ where: { email } });
+      if (!user) {
+        return res.status(401).json({ error: "Authentication required to reset pipeline." });
+      }
+      await prisma.candidate.deleteMany({ where: { userId: user.id } });
+      await prisma.jobDescription.deleteMany({ where: { userId: user.id } });
+      res.json({ success: true, message: "Pipeline cleared successfully." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
-    const store = getUserStore(email);
-    store.candidatesDb = [];
-    store.activeJobDescription = { text: "", title: "" };
-    res.json({ success: true, message: "Pipeline cleared successfully." });
   });
 
   // 4. Delete single candidate
-  app.delete("/api/candidates/:id", (req, res) => {
-    const email = getAuthenticatedUser(req);
-    if (!email) {
-      return res.status(401).json({ error: "Authentication required to delete candidates." });
+  app.delete("/api/candidates/:id", async (req, res) => {
+    try {
+      const email = getAuthenticatedUser(req);
+      if (!email) {
+        return res.status(401).json({ error: "Authentication required to delete candidates." });
+      }
+      const user = await prisma.user.findUnique({
+        where: { email },
+        include: { candidates: true }
+      });
+      if (!user) {
+        return res.status(401).json({ error: "Authentication required to delete candidates." });
+      }
+      const { id } = req.params;
+      const belongsToUser = user.candidates.some((c) => c.id === id);
+      if (!belongsToUser) {
+        return res.status(403).json({ error: "Unauthorized access to candidate record." });
+      }
+
+      await prisma.candidate.delete({ where: { id } });
+
+      // Re-fetch remaining candidates, compute ranks, and sync to DB
+      const remainingCandidates = await prisma.candidate.findMany({
+        where: { userId: user.id }
+      });
+
+      const parsedCandidates: ScreenedCandidate[] = remainingCandidates.map((c) => ({
+        id: c.id,
+        name: c.name,
+        email: c.email,
+        phone: c.phone,
+        fileName: c.fileName,
+        matchScore: c.matchScore,
+        matchingSkills: JSON.parse(c.matchingSkills),
+        missingSkills: JSON.parse(c.missingSkills),
+        experienceRelevance: JSON.parse(c.experienceRelevance),
+        educationAlignment: JSON.parse(c.educationAlignment),
+        keyStrengths: JSON.parse(c.keyStrengths),
+        overallSummary: c.overallSummary,
+        parsedText: c.parsedText || undefined,
+        error: c.error || undefined
+      }));
+
+      const rankedRemaining = computeRanks(parsedCandidates);
+
+      for (const rc of rankedRemaining) {
+        await prisma.candidate.update({
+          where: { id: rc.id },
+          data: { rank: rc.rank }
+        });
+      }
+
+      res.json({ success: true, candidates: rankedRemaining });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
-    const store = getUserStore(email);
-    const { id } = req.params;
-    store.candidatesDb = store.candidatesDb.filter((c) => c.id !== id);
-    res.json({ success: true, candidates: computeRanks(store.candidatesDb) });
   });
 
   // Development VS Production Routing

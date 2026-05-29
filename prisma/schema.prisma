@@ -1,0 +1,51 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String           @id @default(uuid())
+  email        String           @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  candidates   Candidate[]
+  activeJd     JobDescription?
+}
+
+model JobDescription {
+  id        String   @id @default(uuid())
+  title     String
+  text      String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Candidate {
+  id                  String   @id @default(uuid())
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId              String
+  name                String
+  email               String
+  phone               String
+  fileName            String
+  matchScore          Int
+  rank                Int?
+  matchingSkills      String   // JSON serialized string array
+  missingSkills       String   // JSON serialized string array
+  experienceRelevance String   // JSON serialized object: { score: number, summary: string }
+  educationAlignment  String   // JSON serialized object: { status: string, summary: string }
+  keyStrengths        String   // JSON serialized string array
+  overallSummary      String
+  parsedText          String?
+  error               String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
